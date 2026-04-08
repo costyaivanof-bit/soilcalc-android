@@ -30,16 +30,75 @@ jobs:
         with:
           gradle-version: 8.13
 
-      - name: Unzip project
-        run: unzip -q soilcalc_android_studio_project.zip
+      - name: Find and unzip project
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -type f -name "*.zip" | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ZIP file not found in repository root"
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+          unzip -q "$ZIP_FILE"
+
+          PROJECT_DIR=$(find . -maxdepth 3 -type f -name "settings.gradle.kts" -not -path "./.github/*" | sed 's|/settings.gradle.kts||' | head -n 1)
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Android project folder not found after unzip"
+            find . -maxdepth 4 -type f | sort
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Using project dir: $PROJECT_DIR"
+
+      - name: Patch build.gradle.kts
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          p = Path(os.environ["PROJECT_DIR"]) / "app" / "build.gradle.kts"
+          text = p.read_text(encoding="utf-8")
+
+          old_block = '''    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+'''
+          if old_block in text:
+              text = text.replace(old_block, "")
+
+          if 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget' not in text:
+              text = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n\n' + text
+
+          kotlin_block = '''
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+'''
+
+          if 'compilerOptions {' not in text:
+              text = text.replace('\n\ndependencies {', kotlin_block + '\n\ndependencies {')
+
+          p.write_text(text, encoding="utf-8")
+          print("Patched:", p)
+          PY
 
       - name: Build debug APK
         run: |
-          cd soilcalc_android_project
-          gradle assembleDebug
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --stacktrace
+
+      - name: Show APK files
+        if: always()
+        run: find . -path "*/app/build/outputs/apk/*" -type f | sort
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: soilcalc-debug-apk
-          path: soilcalc_android_project/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
